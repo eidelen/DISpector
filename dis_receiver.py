@@ -1,11 +1,64 @@
 import socket
-import struct
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from opendis.PduFactory import createPdu
+
+
+ENTITY_APPEARANCE_PAINT_SCHEME = {
+    0: "Uniform Color",
+    1: "Camouflage",
+}
+
+ENTITY_APPEARANCE_BOOLEAN = {
+    0: "No",
+    1: "Yes",
+}
+
+ENTITY_APPEARANCE_DAMAGE = {
+    0: "No Damage",
+    1: "Slight Damage",
+    2: "Moderate Damage",
+    3: "Destroyed",
+}
+
+ENTITY_APPEARANCE_SMOKE = {
+    0: "Not Smoking",
+    1: "Smoke plume is rising from the entity",
+    2: "Entity is emitting engine smoke",
+    3: "Entity is emitting engine smoke and smoke plume is rising from the entity",
+}
+
+ENTITY_APPEARANCE_TRAILING = {
+    0: "None",
+    1: "Small",
+    2: "Medium",
+    3: "Large",
+}
+
+ENTITY_APPEARANCE_HATCH = {
+    0: "Not applicable",
+    1: "Primary hatch is closed",
+    2: "Primary hatch is popped",
+    3: "Primary hatch is popped and a person is visible under hatch",
+    4: "Primary hatch is open",
+    5: "Primary hatch is open and person is visible",
+    6: "Unused",
+    7: "Unused",
+}
+
+ENTITY_APPEARANCE_LIGHTS = {
+    0: "None",
+    1: "Running lights are on",
+    2: "Navigation lights are on",
+    3: "Formation lights are on",
+    4: "Unused",
+    5: "Unused",
+    6: "Unused",
+    7: "Unused",
+}
 
 
 @dataclass
@@ -77,6 +130,53 @@ def decode_ascii_values(values: Any) -> str:
     return "".join(chars)
 
 
+def _enum_entry(bits: str, value: int, meaning: str) -> Dict[str, Any]:
+    return {
+        "bits": bits,
+        "value": value,
+        "meaning": meaning,
+    }
+
+
+def decode_entity_appearance(value: int) -> Dict[str, Any]:
+    general = value & 0xFFFF
+    specific = (value >> 16) & 0xFFFF
+
+    paint_scheme = (general >> 0) & 0b1
+    mobility_kill = (general >> 1) & 0b1
+    fire_power_kill = (general >> 2) & 0b1
+    damage = (general >> 3) & 0b11
+    smoke = (general >> 5) & 0b11
+    trailing = (general >> 7) & 0b11
+    hatch = (general >> 9) & 0b111
+    lights = (general >> 12) & 0b111
+    flaming = (general >> 15) & 0b1
+
+    return {
+        "raw": value,
+        "hex": f"0x{value:08X}",
+        "binary32": f"{value:032b}",
+        "binary32Grouped": " ".join(
+            f"{(value >> shift) & 0xFF:08b}" for shift in (24, 16, 8, 0)
+        ),
+        "generalAppearanceLow16Hex": f"0x{general:04X}",
+        "generalAppearanceLow16Binary": f"{general:016b}",
+        "specificAppearanceHigh16Hex": f"0x{specific:04X}",
+        "specificAppearanceHigh16Binary": f"{specific:016b}",
+        "generalAppearanceInterpretation": {
+            "paintScheme": _enum_entry("0", paint_scheme, ENTITY_APPEARANCE_PAINT_SCHEME.get(paint_scheme, "Unknown")),
+            "mobilityKill": _enum_entry("1", mobility_kill, "Mobility Kill" if mobility_kill else "No Mobility Kill"),
+            "firePowerKill": _enum_entry("2", fire_power_kill, "Fire-power kill" if fire_power_kill else "No Fire-power kill"),
+            "damage": _enum_entry("3-4", damage, ENTITY_APPEARANCE_DAMAGE.get(damage, "Unknown")),
+            "smoke": _enum_entry("5-6", smoke, ENTITY_APPEARANCE_SMOKE.get(smoke, "Unknown")),
+            "trailingEffect": _enum_entry("7-8", trailing, ENTITY_APPEARANCE_TRAILING.get(trailing, "Unknown")),
+            "hatchState": _enum_entry("9-11", hatch, ENTITY_APPEARANCE_HATCH.get(hatch, "Unknown")),
+            "lights": _enum_entry("12-14", lights, ENTITY_APPEARANCE_LIGHTS.get(lights, "Unknown")),
+            "flamingEffect": _enum_entry("15", flaming, "Flames present" if flaming else "None"),
+        },
+    }
+
+
 def object_to_dict(value: Any, visited: Optional[set] = None) -> Any:
     if visited is None:
         visited = set()
@@ -103,6 +203,9 @@ def object_to_dict(value: Any, visited: Optional[set] = None) -> Any:
             data: Dict[str, Any] = {}
             for key, item in vars(value).items():
                 if key.startswith("_"):
+                    continue
+                if key == "entityAppearance" and isinstance(item, int):
+                    data[key] = decode_entity_appearance(item)
                     continue
                 data[key] = object_to_dict(item, visited)
             if "characters" in data:
