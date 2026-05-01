@@ -359,6 +359,8 @@ class DispectorWindow(QMainWindow):
             json.dumps(packet.details, indent=2, sort_keys=True, default=str)
             + "\n\nRaw Bytes (hex)\n"
             + packet.raw_hex
+            + "\n\nASCII Interpretation\n"
+            + packet.raw_ascii
         )
 
     def _append_tree_items(self, parent: QTreeWidgetItem, value: Any, key_name: str = "") -> None:

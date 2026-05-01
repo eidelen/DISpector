@@ -76,7 +76,12 @@ class PacketRecord:
     entity_name: str
     summary: str
     raw_hex: str
+    raw_ascii: str
     details: Dict[str, Any]
+
+
+def format_ascii_bytes(data: bytes) -> str:
+    return "".join(chr(byte) if 32 <= byte <= 126 else "." for byte in data)
 
 
 def decode_marking(marking: Any) -> str:
@@ -257,6 +262,7 @@ def build_packet_record(sequence: int, data: bytes, source: Tuple[str, int], pdu
         entity_name=entity_name,
         summary=", ".join(summary_parts),
         raw_hex=data.hex(" "),
+        raw_ascii=format_ascii_bytes(data),
         details=details,
     )
 
