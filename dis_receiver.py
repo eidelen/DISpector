@@ -2,6 +2,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Dict, List, Optional, Tuple
 
 from opendis.PduFactory import createPdu
@@ -143,6 +144,23 @@ def _enum_entry(bits: str, value: int, meaning: str) -> Dict[str, Any]:
     }
 
 
+def decode_object_appearance(value: Any) -> str:
+    if isinstance(value, bytes):
+        number = int.from_bytes(value[:2].ljust(2, b"\x00"), byteorder="big", signed=False)
+        return f"{number:016b}"
+
+    if isinstance(value, bool):
+        return f"{int(value):016b}"
+
+    if isinstance(value, int):
+        return f"{value & 0xFFFF:016b}"
+
+    if isinstance(value, float) and isfinite(value):
+        return f"{int(value) & 0xFFFF:016b}"
+
+    return str(value)
+
+
 def decode_entity_appearance(value: int) -> Dict[str, Any]:
     general = value & 0xFFFF
     specific = (value >> 16) & 0xFFFF
@@ -211,6 +229,9 @@ def object_to_dict(value: Any, visited: Optional[set] = None) -> Any:
                     continue
                 if key == "entityAppearance" and isinstance(item, int):
                     data[key] = decode_entity_appearance(item)
+                    continue
+                if key == "objectAppearance":
+                    data[key] = decode_object_appearance(item)
                     continue
                 data[key] = object_to_dict(item, visited)
             if "characters" in data:
