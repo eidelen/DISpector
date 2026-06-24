@@ -2,6 +2,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from math import isfinite
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -60,6 +61,9 @@ ENTITY_APPEARANCE_LIGHTS = {
     6: "Unused",
     7: "Unused",
 }
+
+IFACTS_TIME_24_DATUM_ID = 52001
+IFACTS_DATE_EUROPEAN_DATUM_ID = 52601
 
 
 @dataclass
@@ -134,6 +138,107 @@ def decode_ascii_values(values: Any) -> str:
         else:
             chars.append(f"\\x{code:02x}")
     return "".join(chars)
+
+
+def _select_entity_identifier(pdu: Any) -> Any:
+    entity_identifier = getattr(pdu, "entityID", None)
+    if entity_identifier is not None:
+        return entity_identifier
+
+    for attribute_name in ("originatingEntityID", "receivingEntityID"):
+        candidate = getattr(pdu, attribute_name, None)
+        if candidate is None:
+            continue
+        simulation_address = getattr(candidate, "simulationAddress", None)
+        if simulation_address is None:
+            continue
+        if any(
+            getattr(simulation_address, field_name, 0) != 0
+            for field_name in ("site", "application")
+        ) or getattr(candidate, "entityNumber", 0) != 0:
+            return candidate
+
+    return None
+
+
+def _extract_variable_datum_bytes(variable_datum: Any) -> bytes:
+    bit_length = getattr(variable_datum, "variableDatumLength", 0) or 0
+    byte_length = max(0, (bit_length + 7) // 8)
+    values = getattr(variable_datum, "variableData", None)
+    if not isinstance(values, list):
+        return b""
+
+    byte_values = bytearray()
+    for value in values[:byte_length]:
+        if isinstance(value, int):
+            byte_values.append(value & 0xFF)
+    return bytes(byte_values)
+
+
+def _interpret_variable_datum(variable_datum: Any) -> Dict[str, Any]:
+    datum_id = getattr(variable_datum, "variableDatumID", None)
+    payload = _extract_variable_datum_bytes(variable_datum)
+    ascii_text = payload.decode("ascii", errors="replace").rstrip("\x00 ")
+
+    interpretation: Dict[str, Any] = {
+        "datumId": datum_id,
+        "lengthBits": getattr(variable_datum, "variableDatumLength", None),
+        "lengthBytes": len(payload),
+        "payloadHex": payload.hex(" "),
+        "payloadAscii": ascii_text,
+    }
+
+    if datum_id == IFACTS_TIME_24_DATUM_ID:
+        interpretation["meaning"] = "IFACTS UTC time (HHMMSS)"
+        if len(ascii_text) == 6 and ascii_text.isdigit():
+            interpretation["formattedTimeUtc"] = (
+                f"{ascii_text[0:2]}:{ascii_text[2:4]}:{ascii_text[4:6]}"
+            )
+    elif datum_id == IFACTS_DATE_EUROPEAN_DATUM_ID:
+        interpretation["meaning"] = "IFACTS date (DDMMYYYY)"
+        if len(ascii_text) == 8 and ascii_text.isdigit():
+            interpretation["formattedDate"] = (
+                f"{ascii_text[0:2]}.{ascii_text[2:4]}.{ascii_text[4:8]}"
+            )
+            interpretation["isoDate"] = (
+                f"{ascii_text[4:8]}-{ascii_text[2:4]}-{ascii_text[0:2]}"
+            )
+    else:
+        interpretation["meaning"] = "Unrecognized variable datum"
+
+    return interpretation
+
+
+def _interpret_set_data_pdu(pdu: Any, details: Dict[str, Any]) -> None:
+    variable_datums = getattr(pdu, "variableDatumRecords", None)
+    if not isinstance(variable_datums, list):
+        return
+
+    interpreted_variable_datums = [
+        _interpret_variable_datum(variable_datum) for variable_datum in variable_datums
+    ]
+    details["interpretedVariableDatumRecords"] = interpreted_variable_datums
+
+    time_text = ""
+    date_text = ""
+    for item in interpreted_variable_datums:
+        datum_id = item.get("datumId")
+        ascii_text = item.get("payloadAscii", "")
+        if datum_id == IFACTS_TIME_24_DATUM_ID:
+            time_text = ascii_text
+        elif datum_id == IFACTS_DATE_EUROPEAN_DATUM_ID:
+            date_text = ascii_text
+
+    if len(time_text) == 6 and time_text.isdigit() and len(date_text) == 8 and date_text.isdigit():
+        combined = f"{date_text}{time_text}"
+        try:
+            parsed = datetime.strptime(combined, "%d%m%Y%H%M%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return
+        details["ifactsSimulationTimeUtc"] = {
+            "iso8601": parsed.isoformat().replace("+00:00", "Z"),
+            "display": parsed.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        }
 
 
 def _enum_entry(bits: str, value: int, meaning: str) -> Dict[str, Any]:
@@ -249,7 +354,7 @@ def build_packet_record(sequence: int, data: bytes, source: Tuple[str, int], pdu
     pdu_type = pdu.__class__.__name__
     exercise_id = getattr(pdu, "exerciseID", None)
 
-    entity_identifier = getattr(pdu, "entityID", None)
+    entity_identifier = _select_entity_identifier(pdu)
     simulation_address = getattr(entity_identifier, "simulationAddress", None)
 
     application_id = getattr(simulation_address, "application", None)
@@ -257,10 +362,16 @@ def build_packet_record(sequence: int, data: bytes, source: Tuple[str, int], pdu
     entity_id = getattr(entity_identifier, "entityNumber", None)
 
     entity_name = decode_marking(getattr(pdu, "marking", None))
-    if not entity_name:
-        entity_name = "<unnamed>"
-
     details = object_to_dict(pdu)
+    if pdu_type == "SetDataPdu":
+        _interpret_set_data_pdu(pdu, details)
+
+    if not entity_name:
+        if pdu_type == "SetDataPdu" and "ifactsSimulationTimeUtc" in details:
+            entity_name = details["ifactsSimulationTimeUtc"]["display"]
+        else:
+            entity_name = "<unnamed>"
+
     summary_parts = [
         f"type={pdu_type}",
         f"exercise={exercise_id}" if exercise_id is not None else "exercise=n/a",
@@ -268,6 +379,11 @@ def build_packet_record(sequence: int, data: bytes, source: Tuple[str, int], pdu
         f"entity={site_id}:{application_id}:{entity_id}" if entity_id is not None else "entity=n/a",
         f"name={entity_name}",
     ]
+
+    if pdu_type == "SetDataPdu":
+        request_id = getattr(pdu, "requestID", None)
+        if request_id is not None:
+            summary_parts.append(f"request={request_id}")
 
     return PacketRecord(
         sequence=sequence,
