@@ -10,6 +10,7 @@ from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -33,7 +34,7 @@ from PyQt5.QtWidgets import (
 from dis_receiver import DisReceiver, PacketRecord
 
 
-MAX_PACKETS = 5000
+MAX_VISIBLE_PACKETS = 5000
 
 
 class DispectorWindow(QMainWindow):
@@ -42,6 +43,7 @@ class DispectorWindow(QMainWindow):
         self.setWindowTitle("DISpector")
         self.resize(1500, 900)
 
+        self._captured_packets: List[PacketRecord] = []
         self._all_packets: List[PacketRecord] = []
         self._visible_packets: List[PacketRecord] = []
         self._pending_packets: "queue.SimpleQueue[PacketRecord]" = queue.SimpleQueue()
@@ -89,15 +91,19 @@ class DispectorWindow(QMainWindow):
         button_column = QVBoxLayout()
         self.start_button = QPushButton("Start Capture")
         self.stop_button = QPushButton("Stop Capture")
+        self.save_button = QPushButton("Save JSON")
         self.clear_button = QPushButton("Clear Packets")
         self.stop_button.setEnabled(False)
+        self.save_button.setEnabled(False)
 
         self.start_button.clicked.connect(self._start_capture)
         self.stop_button.clicked.connect(self._stop_capture)
+        self.save_button.clicked.connect(self._save_packets)
         self.clear_button.clicked.connect(self._clear_packets)
 
         button_column.addWidget(self.start_button)
         button_column.addWidget(self.stop_button)
+        button_column.addWidget(self.save_button)
         button_column.addWidget(self.clear_button)
         button_column.addStretch(1)
         layout.addLayout(button_column)
@@ -191,22 +197,75 @@ class DispectorWindow(QMainWindow):
 
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+        self.save_button.setEnabled(False)
         self._set_status(f"Capturing on {bind_host}:{bind_port}")
 
     def _stop_capture(self) -> None:
         self.receiver.stop()
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self._update_save_button_state()
         self._set_status("Capture stopped")
 
     def _clear_packets(self) -> None:
+        self._captured_packets.clear()
         self._all_packets.clear()
         self._visible_packets.clear()
         self.packet_table.setRowCount(0)
         self.details_tree.clear()
         self.raw_text.clear()
         self._rebuild_pdu_type_filter()
+        self._update_save_button_state()
         self._set_status("Packets cleared")
+
+    def _save_packets(self) -> None:
+        if not self._captured_packets:
+            QMessageBox.information(self, "Save JSON", "There are no captured packets to save.")
+            return
+
+        default_name = f"dis-capture-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Captured Traffic",
+            default_name,
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not file_path:
+            return
+
+        payload = {
+            "capturedAt": datetime.now().isoformat(timespec="seconds"),
+            "packetCount": len(self._captured_packets),
+            "packets": [self._packet_to_export_dict(packet) for packet in self._captured_packets],
+        }
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+        except OSError as exc:
+            QMessageBox.critical(self, "Save JSON", f"Failed to save JSON: {exc}")
+            return
+
+        self._set_status(f"Saved {len(self._captured_packets)} packet(s) to {file_path}")
+
+    def _packet_to_export_dict(self, packet: PacketRecord) -> Dict[str, Any]:
+        return {
+            "sequence": packet.sequence,
+            "receivedAt": datetime.fromtimestamp(packet.received_at).isoformat(timespec="milliseconds"),
+            "sourceHost": packet.source_host,
+            "sourcePort": packet.source_port,
+            "sizeBytes": packet.size_bytes,
+            "pduType": packet.pdu_type,
+            "exerciseId": packet.exercise_id,
+            "applicationId": packet.application_id,
+            "siteId": packet.site_id,
+            "entityId": packet.entity_id,
+            "entityName": packet.entity_name,
+            "summary": packet.summary,
+            "rawHex": packet.raw_hex,
+            "rawAscii": packet.raw_ascii,
+            "details": packet.details,
+        }
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self.receiver.stop()
@@ -237,15 +296,20 @@ class DispectorWindow(QMainWindow):
         if not new_packets:
             return
 
+        self._captured_packets.extend(new_packets)
         self._all_packets.extend(new_packets)
 
-        if len(self._all_packets) > MAX_PACKETS:
-            overflow = len(self._all_packets) - MAX_PACKETS
+        if len(self._all_packets) > MAX_VISIBLE_PACKETS:
+            overflow = len(self._all_packets) - MAX_VISIBLE_PACKETS
             self._all_packets = self._all_packets[overflow:]
 
         self._rebuild_pdu_type_filter()
         self._apply_filters()
-        self._set_status(f"Captured {len(self._all_packets)} packet(s)")
+        self._update_save_button_state()
+        self._set_status(
+            f"Captured {len(self._captured_packets)} packet(s)"
+            f" ({len(self._all_packets)} shown)"
+        )
 
     def _rebuild_pdu_type_filter(self) -> None:
         current = self.pdu_type_combo.currentText()
@@ -395,6 +459,9 @@ class DispectorWindow(QMainWindow):
 
     def _set_status(self, message: str) -> None:
         self.status_bar.showMessage(message)
+
+    def _update_save_button_state(self) -> None:
+        self.save_button.setEnabled(bool(self._captured_packets) and not self.receiver.running)
 
 
 def main() -> int:
